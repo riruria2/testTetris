@@ -167,41 +167,39 @@ const PIECES = [
   [[5,5,0],[0,5,5],[0,0,0]],                   // Z
   [[6,0,0],[6,6,6],[0,0,0]],                   // J
   [[0,0,7],[7,7,7],[0,0,0]],                   // L
-  [[7,7,7],[7,7,7],[7,7,7]],
 ];
 
-let board, piece, pieceX, pieceY, nextPiece;
+let board, pieceType, currentShape, pieceX, pieceY, nextType;
 let score, level, lines, best = 0;
-let state = 'idle'; // idle, playing, paused, dead
-let dropTimer, lastTime = 0, dropInterval = 800;
-let raf;
-let flashRows = [], flashTimer = 0;
+let state = 'idle';
+let lastTime = 0, dropInterval = 800;
+let raf, locking = false;
+let flashRows = [];
+
+function cloneShape(s) { return s.map(r => [...r]); }
 
 function newBoard() {
   return Array.from({length: ROWS}, () => Array(COLS).fill(0));
 }
 
-function randPiece() {
-  return Math.floor(Math.random() * 8) + 1;
-}
+function randType() { return Math.floor(Math.random() * 7) + 1; }
 
 function reset() {
   board = newBoard();
   score = 0; level = 1; lines = 0;
-  dropInterval = 800;
-  nextPiece = randPiece();
+  dropInterval = 800; locking = false; flashRows = [];
+  nextType = randType();
   spawnPiece();
   updateHUD();
-  flashRows = []; flashTimer = 0;
 }
 
 function spawnPiece() {
-  piece = nextPiece;
-  nextPiece = randPiece();
-  const shape = PIECES[piece];
-  pieceX = Math.floor((COLS - shape[0].length) / 2);
+  pieceType = nextType;
+  nextType = randType();
+  currentShape = cloneShape(PIECES[pieceType]);
+  pieceX = Math.floor((COLS - currentShape[0].length) / 2);
   pieceY = 0;
-  if (collides(shape, pieceX, pieceY)) { die(); }
+  if (collides(currentShape, pieceX, pieceY)) { die(); return; }
   drawNext();
 }
 
@@ -209,9 +207,9 @@ function collides(shape, ox, oy) {
   for (let r = 0; r < shape.length; r++)
     for (let c = 0; c < shape[r].length; c++)
       if (shape[r][c]) {
-        const nx = ox + c, ny = oy + r;
-        if (nx < 0 || nx >= COLS || ny >= ROWS) return true;
-        if (ny >= 0 && board[ny][nx]) return true;
+        const tx = ox + c, ty = oy + r;
+        if (tx < 0 || tx >= COLS || ty >= ROWS) return true;
+        if (ty >= 0 && board[ty][tx]) return true;
       }
   return false;
 }
@@ -221,37 +219,28 @@ function rotate(shape) {
 }
 
 function lock() {
-  const shape = PIECES[piece];
-  for (let r = 0; r < shape.length; r++)
-    for (let c = 0; c < shape[r].length; c++)
-      if (shape[r][c] && pieceY + r >= 0)
-        board[pieceY + r][pieceX + c] = shape[r][c];
-  clearLines();
-  spawnPiece();
-}
-
-function clearLines() {
+  if (locking) return; locking = true;
+  for (let r = 0; r < currentShape.length; r++)
+    for (let c = 0; c < currentShape[r].length; c++)
+      if (currentShape[r][c] && pieceY + r >= 0)
+        board[pieceY + r][pieceX + c] = currentShape[r][c];
   const full = [];
   for (let r = 0; r < ROWS; r++)
     if (board[r].every(c => c)) full.push(r);
-  if (!full.length) return;
+  if (!full.length) { locking = false; spawnPiece(); return; }
   flashRows = full;
-  flashTimer = 8;
   setTimeout(() => {
-    for (const r of full) {
-      board.splice(r, 1);
-      board.unshift(Array(COLS).fill(0));
-    }
-    flashRows = []; flashTimer = 0;
+    const sorted = [...full].sort((a,b) => b - a);
+    for (const r of sorted) { board.splice(r, 1); board.unshift(Array(COLS).fill(0)); }
+    flashRows = [];
     const cleared = full.length;
     lines += cleared;
-    const pts = [0, 100, 300, 500, 800][cleared] * level;
-    score += pts;
+    score += [0,100,300,500,800][cleared] * level;
     level = Math.floor(lines / 10) + 1;
-    dropInterval = Math.max(100, 800 - (level - 1) * 70);
+    dropInterval = Math.max(100, 800 - (level-1)*70);
     if (score > best) best = score;
-    updateHUD();
-  }, 130);
+    updateHUD(); locking = false; spawnPiece();
+  }, 150);
 }
 
 function updateHUD() {
@@ -262,7 +251,8 @@ function updateHUD() {
 }
 
 function hardDrop() {
-  while (!collides(PIECES[piece], pieceX, pieceY + 1)) pieceY++;
+  if (locking) return;
+  while (!collides(currentShape, pieceX, pieceY + 1)) pieceY++;
   lock();
 }
 
@@ -275,6 +265,7 @@ function die() {
 }
 
 function start() {
+  cancelAnimationFrame(raf);
   reset();
   state = 'playing';
   overlay.style.display = 'none';
@@ -284,14 +275,10 @@ function start() {
 
 function gameLoop(ts) {
   if (state !== 'playing') return;
-  const dt = ts - lastTime;
-  if (dt > dropInterval) {
+  if (!locking && ts - lastTime > dropInterval) {
     lastTime = ts;
-    if (!collides(PIECES[piece], pieceX, pieceY + 1)) {
-      pieceY++;
-    } else {
-      lock();
-    }
+    if (!collides(currentShape, pieceX, pieceY + 1)) pieceY++;
+    else lock();
   }
   draw();
   raf = requestAnimationFrame(gameLoop);
@@ -345,29 +332,30 @@ function draw() {
   }
 
   if (state !== 'playing' && state !== 'paused') return;
+  if (!currentShape) return;
 
   // ghost
-  const shape = PIECES[piece];
   let ghostY = pieceY;
-  while (!collides(shape, pieceX, ghostY + 1)) ghostY++;
+  while (!collides(currentShape, pieceX, ghostY + 1)) ghostY++;
   if (ghostY !== pieceY) {
-    for (let r = 0; r < shape.length; r++)
-      for (let c = 0; c < shape[r].length; c++)
-        if (shape[r][c] && ghostY + r >= 0)
-          drawCell(cx, pieceX + c, ghostY + r, COLORS[shape[r][c]], SZ, true);
+    for (let r = 0; r < currentShape.length; r++)
+      for (let c = 0; c < currentShape[r].length; c++)
+        if (currentShape[r][c] && ghostY + r >= 0)
+          drawCell(cx, pieceX + c, ghostY + r, COLORS[currentShape[r][c]], SZ, true);
   }
 
   // active piece
-  for (let r = 0; r < shape.length; r++)
-    for (let c = 0; c < shape[r].length; c++)
-      if (shape[r][c] && pieceY + r >= 0)
-        drawCell(cx, pieceX + c, pieceY + r, COLORS[shape[r][c]], SZ, false);
+  for (let r = 0; r < currentShape.length; r++)
+    for (let c = 0; c < currentShape[r].length; c++)
+      if (currentShape[r][c] && pieceY + r >= 0)
+        drawCell(cx, pieceX + c, pieceY + r, COLORS[currentShape[r][c]], SZ, false);
 }
 
 function drawNext() {
   nc.fillStyle = '#0f0f1a';
   nc.fillRect(0, 0, 80, 80);
-  const shape = PIECES[nextPiece];
+  const shape = PIECES[nextType];
+  if (!shape) return;
   const sz = 16;
   const ox = Math.floor((5 - shape[0].length) / 2);
   const oy = Math.floor((5 - shape.length) / 2);
@@ -395,24 +383,23 @@ document.addEventListener('keydown', e => {
     raf = requestAnimationFrame(gameLoop);
     return;
   }
-  if (state !== 'playing') return;
-  const shape = PIECES[piece];
+  if (state !== 'playing' || locking) return;
   switch (e.code) {
     case 'ArrowLeft':
-      if (!collides(shape, pieceX - 1, pieceY)) pieceX--;
+      if (!collides(currentShape, pieceX - 1, pieceY)) pieceX--;
       break;
     case 'ArrowRight':
-      if (!collides(shape, pieceX + 1, pieceY)) pieceX++;
+      if (!collides(currentShape, pieceX + 1, pieceY)) pieceX++;
       break;
     case 'ArrowDown':
-      if (!collides(shape, pieceX, pieceY + 1)) { pieceY++; lastTime = performance.now(); }
+      if (!collides(currentShape, pieceX, pieceY + 1)) { pieceY++; lastTime = performance.now(); }
       break;
     case 'ArrowUp':
     case 'KeyX': {
-      const rot = rotate(shape);
-      if (!collides(rot, pieceX, pieceY)) { PIECES[piece] = rot; }
-      else if (!collides(rot, pieceX - 1, pieceY)) { PIECES[piece] = rot; pieceX--; }
-      else if (!collides(rot, pieceX + 1, pieceY)) { PIECES[piece] = rot; pieceX++; }
+      const rot = rotate(currentShape);
+      if (!collides(rot, pieceX, pieceY)) currentShape = rot;
+      else if (!collides(rot, pieceX - 1, pieceY)) { currentShape = rot; pieceX--; }
+      else if (!collides(rot, pieceX + 1, pieceY)) { currentShape = rot; pieceX++; }
       break;
     }
     case 'Space': hardDrop(); break;
@@ -443,16 +430,15 @@ cv.addEventListener('touchstart', e => {
 cv.addEventListener('touchend', e => {
   const dx = e.changedTouches[0].clientX - touchX;
   const dy = e.changedTouches[0].clientY - touchY;
-  if (state !== 'playing') return;
-  const shape = PIECES[piece];
+  if (state !== 'playing' || locking) return;
   if (Math.abs(dx) > Math.abs(dy)) {
-    if (dx > 20 && !collides(shape, pieceX+1, pieceY)) pieceX++;
-    else if (dx < -20 && !collides(shape, pieceX-1, pieceY)) pieceX--;
+    if (dx > 20 && !collides(currentShape, pieceX+1, pieceY)) pieceX++;
+    else if (dx < -20 && !collides(currentShape, pieceX-1, pieceY)) pieceX--;
   } else {
     if (dy > 20) hardDrop();
     else if (dy < -20) {
-      const rot = rotate(shape);
-      if (!collides(rot, pieceX, pieceY)) PIECES[piece] = rot;
+      const rot = rotate(currentShape);
+      if (!collides(rot, pieceX, pieceY)) currentShape = rot;
     }
   }
   e.preventDefault();
